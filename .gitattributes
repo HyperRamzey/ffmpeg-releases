@@ -1,0 +1,4 @@
+# pin text files to LF (bash scripts + YAML must not get CRLF)
+* text=auto eol=lf
+*.yml text eol=lf
+*.md text eol=lf
