@@ -13,7 +13,7 @@ FFmpeg builds. Companion mpv builds release separately at
 
 ## What gets built
 
-Four CPU/GPU targets, clang 22 (MSYS2 CLANG64), every external library
+Five CPU/GPU targets, clang 22 (MSYS2 CLANG64), every external library
 self-compiled from git masters via the
 [deps-build](https://github.com/HyperRamzey/deps-build) framework:
 
@@ -23,9 +23,12 @@ self-compiled from git masters via the
 | `ffmpeg-zn2`    | Zen2 (znver2)       | GTX 1650M (Pascal)   | sm_75   |
 | `ffmpeg-11700`  | i7-11700 (rocketlake) | RTX 4080 (Ada)     | sm_89   |
 | `ffmpeg-3050`   | Zen2 (znver2)       | RTX 3050M (Ampere)   | sm_86   |
+| `ffmpeg-14600`  | i5-14600 (raptorlake) | RTX 50-series (Blackwell) | sm_120a |
 
-Each zip is a portable dir: `ffmpeg.exe`, `ffplay.exe`, `ffprobe.exe`
-plus all runtime DLLs (libplacebo-371 with shaderc SPIR-V, etc.).
+Each zip is a lean portable dir: `ffmpeg.exe`, `ffplay.exe`,
+`ffprobe.exe` plus the minimal runtime DLL set (vulkan-1.dll + the
+VapourSynth frameserver). libplacebo (with libdovi, shaderc SPIR-V),
+SDL2 and every other library are statically embedded into the exes.
 
 Highlights: Dolby Vision P7 FEL capable libplacebo filter, NVENC/NVDEC
 (clang NVPTX, no CUDA toolkit needed at build time), and **Apple
@@ -64,20 +67,26 @@ Usage: `ffmpeg -i input.mkv -c:a aac_at -q 4 output.mkv`
 
 ## Pipeline
 
-`.github/workflows/release.yml` mirrors the local build flow 1:1
-(same scripts from [deps-build](https://github.com/HyperRamzey/deps-build)
-and [ffmpeg-build](https://github.com/HyperRamzey/ffmpeg-build)):
+`.github/workflows/release.yml` mirrors the local build flow 1:1. It is
+a TWO-repo model: this workflow's only checkout is
+[HyperRamzey/mpv-build](https://github.com/HyperRamzey/mpv-build), which
+is self-contained — it vendors the dependency framework in `deps/` and
+the FFmpeg per-target build scripts in `ffmpeg-scripts/`. A materialize
+step copies those folds to the hardcoded `/g/deps-build` +
+`/g/ffmpeg-build` paths, so the exact local scripts run verbatim:
 
 ```text
-sync-sources -> deps x4 (incl. libplacebo) -> ffmpeg x4 -> release
+sync-sources -> deps x5 (incl. libplacebo) -> ffmpeg x5 -> release
 ```
 
 Trigger with **Actions → release → Run workflow** (optionally pass a
 `release_tag`), or push a `v*` tag. Every successful run posts a
-release with the four zips.
+release with the five zips.
 
 ## Source repos
 
-- Build scripts: [HyperRamzey/ffmpeg-build](https://github.com/HyperRamzey/ffmpeg-build)
-- Dependency framework: [HyperRamzey/deps-build](https://github.com/HyperRamzey/deps-build)
-- mpv pipeline + releases: [HyperRamzey/mpv-build](https://github.com/HyperRamzey/mpv-build)
+- Build framework (vendored: deps/ + ffmpeg-scripts/):
+  [HyperRamzey/mpv-build](https://github.com/HyperRamzey/mpv-build)
+- mpv pipeline + releases:
+  [HyperRamzey/mpv-build](https://github.com/HyperRamzey/mpv-build)
+- THIS workflow repo: HyperRamzey/ffmpeg-releases

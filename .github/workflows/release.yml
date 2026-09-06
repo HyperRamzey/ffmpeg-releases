@@ -5,18 +5,22 @@
 # Local orchestrator: G:\mpv-build\build-all.sh
 #   step 0  clean                    -> CI runners are always fresh (no-op)
 #   step 1  git pull ALL sources     -> job: sync-sources
-#   step 2  deps x3 (build-deps.sh)  -> job: deps   (matrix zn3/zn2/11700/3050)
-#   step 3  libplacebo x3            -> job: deps   (same job, right after)
-#   step 4  FFmpeg x3                -> job: ffmpeg (matrix)
-#   step 5  mpv x3                   -> job: mpv    (matrix)
-#   step 6  verification             -> verify steps in ffmpeg/mpv jobs
+#   step 2  deps x5 (build-deps.sh)  -> job: deps   (matrix from setup job)
+#   step 3  libplacebo x5            -> job: deps   (same job, right after)
+#   step 4  FFmpeg x5               -> job: ffmpeg (matrix)
+#   step 5  (mpv builds live in the mpv-build repo; not built here)
+#   step 6  verification             -> verify steps in the ffmpeg job
 #
 # The SAME scripts are executed verbatim (build-deps.sh,
 # build-libplacebo-*.sh, ffmpeg build-*.sh, copydlls.sh). They hardcode
 # /g/mpv-build, /g/ffmpeg-build, /g/deps-build and /clang64/... paths,
 # so the runner recreates that layout:
-#   * the three repos are checked out under <workspace>\g\<repo>
-#     (mpv-build is needed for build-libplacebo-*.sh + check-scripts.sh)
+#   * ONE repo checkout: HyperRamzey/mpv-build is self-contained — it
+#     vendors the dependency framework in deps/ and the FFmpeg per-target
+#     build scripts in ffmpeg-scripts/
+#   * a materialize step copies deps/ -> g/deps-build and
+#     ffmpeg-scripts/ -> g/ffmpeg-build, so every hardcoded /g/... path
+#     resolves exactly like on the local machine
 #   * `subst G: <workspace>\g`  =>  MSYS2 sees /g/mpv-build etc.
 #   * MSYS2 is installed to C:\msys64 so /clang64 resolves (as locally)
 #
@@ -28,11 +32,11 @@
 # The CUDA_PATH/PATH exports in the ffmpeg scripts are kept verbatim and
 # are harmless no-ops when the directory is absent.
 #
-# Repository layout requirement (3 sibling repos under the SAME owner):
-#   mpv-build     <- this repo (workflow + mpv/libplacebo build scripts)
-#   ffmpeg-build  <- FFmpeg per-target build scripts
-#   deps-build    <- dependency framework (recipes, common.sh, patches)
-# See CI-SETUP.md next to this file for one-time push instructions.
+# Repository layout (TWO repos total under the same owner):
+#   mpv-build         <- workflow + mpv/libplacebo scripts + deps/ +
+#                        ffmpeg-scripts/ (the build framework; this repo
+#                        also posts the mpv releases)
+#   ffmpeg-releases    <- THIS repo (FFmpeg-only release workflow)
 #
 # Caching (actions/cache, 10 GB/repo budget, LRU-evicted):
 #   src-<run>-<attempt>   all upstream clones: ~90 dep repos + mpv +
@@ -55,6 +59,13 @@ name: release
 "on":
   workflow_dispatch:
     inputs:
+      targets:
+        description: >-
+          Space-separated target list to build (default: all five).
+          Each target maps to a fixed cpu/gpu/cuda gen in the build
+          scripts (deps-build common.sh target_env + ffmpeg NVCC flags).
+        type: string
+        default: "zn3 zn2 11700 3050 14600"
       force_deps:
         description: "Rebuild ALL dependencies (ignore stamp cache)"
         type: boolean
@@ -87,8 +98,65 @@ env:
   PLACEBO_REPO: https://code.videolan.org/videolan/libplacebo.git
   # unique per run+attempt: cache keys derived from it never collide
   CACHE_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+  # Target generation table: one row = one hardware gen (name cpu gpu
+  # cuda). The dispatch `targets` input selects any subset; the setup
+  # job turns the selection into the per-job build matrix.
+  # Per-target codegen lives in the scripts (single source of truth):
+  #   cpu  -> deps-build common.sh target_env (-march/-mtune)
+  #   cuda -> ffmpeg-build build-<t>.sh NVCCFLAGS (clang NVPTX)
+  TARGET_TABLE: |
+    zn3 znver3 Ryzen-5700X3D+RTX-5070-Blackwell sm_120a
+    zn2 znver2 Zen2+GTX-1650M-Pascal sm_75
+    11700 rocketlake i7-11700+RTX-4080-Ada sm_89
+    3050 znver2 Zen2+RTX-3050M-Ampere sm_86
+    14600 raptorlake i5-14600+RTX-50-series-Blackwell sm_120a
 
 jobs:
+  # ==========================================================================
+  # setup: parse TARGET_TABLE (+ optional dispatch `targets` subset) into
+  # the per-job build matrix. Mirrors the mpv-build workflow 1:1.
+  # ==========================================================================
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.mx.outputs.matrix }}
+    steps:
+      - name: Build target matrix
+        id: mx
+        shell: bash
+        env:
+          TARGET_TABLE: ${{ env.TARGET_TABLE }}
+          TARGETS_INPUT: ${{ inputs.targets || 'zn3 zn2 11700 3050 14600' }}
+        run: |
+          set -euo pipefail
+          # rows: <name> <cpu> <gpu-label> <cuda>
+          all="$(echo "$TARGET_TABLE" | sed '/^\s*#/d;/^\s*$/d')"
+          want="${TARGETS_INPUT:-zn3 zn2 11700 3050 14600}"
+          echo "requested targets: $want"
+          json="["
+          first=1
+          while read -r name cpu gpu cuda; do
+            [ -n "$name" ] || continue
+            # keep only requested targets (tag pushes default to all)
+            if ! echo " $want " | grep -q " $name "; then
+              echo "skip $name (not requested)"
+              continue
+            fi
+            # zn3 ffmpeg prefix is the historical bare 'install'
+            ffdir=install-"$name"
+            [ "$name" = zn3 ] && ffdir=install
+            sep=,
+            [ $first -eq 1 ] && sep=""
+            entry="{\"target\":\"$name\",\"cpu\":\"$cpu\",\"gpu\":\"$gpu\","
+            entry+="\"cuda\":\"$cuda\",\"install_dir\":\"$ffdir\"}"
+            json+="$sep$entry"
+            first=0
+          done <<< "$all"
+          json+="]"
+          echo "matrix: $json"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
   # ==========================================================================
   # Lint: bash -n + broken-continuation scan over every build script
   # ==========================================================================
@@ -96,20 +164,19 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
-      - name: Check out mpv-build
+      - name: "Check out mpv-build (self-contained: deps/ + ffmpeg-scripts/)"
         uses: actions/checkout@v6
         with:
+          repository: ${{ github.repository_owner }}/mpv-build
           path: g/mpv-build
-      - name: Check out deps-build
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/deps-build
-          path: g/deps-build
-      - name: Check out ffmpeg-build
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/ffmpeg-build
-          path: g/ffmpeg-build
+      - name: Materialize deps-build + ffmpeg-build from in-repo copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -r "$(cygpath -u "$GITHUB_WORKSPACE")/g/mpv-build/deps" \
+             "$(cygpath -u "$GITHUB_WORKSPACE")/g/deps-build"
+          cp -r "$(cygpath -u "$GITHUB_WORKSPACE")/g/mpv-build/ffmpeg-scripts" \
+             "$(cygpath -u "$GITHUB_WORKSPACE")/g/ffmpeg-build"
       - name: "Map G: drive"
         shell: pwsh
         run: |
@@ -127,20 +194,19 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
-      - name: Check out mpv-build
+      - name: "Check out mpv-build (self-contained: deps/ + ffmpeg-scripts/)"
         uses: actions/checkout@v6
         with:
+          repository: ${{ github.repository_owner }}/mpv-build
           path: g/mpv-build
-      - name: Check out deps-build
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/deps-build
-          path: g/deps-build
-      - name: Check out ffmpeg-build
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/ffmpeg-build
-          path: g/ffmpeg-build
+      - name: Materialize deps-build + ffmpeg-build from in-repo copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -r "$(cygpath -u "$GITHUB_WORKSPACE")/g/mpv-build/deps" \
+             "$(cygpath -u "$GITHUB_WORKSPACE")/g/deps-build"
+          cp -r "$(cygpath -u "$GITHUB_WORKSPACE")/g/mpv-build/ffmpeg-scripts" \
+             "$(cygpath -u "$GITHUB_WORKSPACE")/g/ffmpeg-build"
       - name: "Map G: drive (scripts use hardcoded /g/... paths)"
         shell: pwsh
         run: |
@@ -198,23 +264,27 @@ jobs:
   # Runs the exact local scripts: build-deps.sh, build-libplacebo-*.sh
   # ==========================================================================
   deps:
-    needs: [sync-sources, lint-scripts]
+    needs: [sync-sources, lint-scripts, setup]
     runs-on: windows-2025
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        target: ["zn3", "zn2", "11700", "3050"]
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
-      - name: Check out mpv-build
+      - name: "Check out mpv-build (self-contained: deps/ + ffmpeg-scripts/)"
         uses: actions/checkout@v6
         with:
+          repository: ${{ github.repository_owner }}/mpv-build
           path: g/mpv-build
-      - name: Check out deps-build
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/deps-build
-          path: g/deps-build
+      - name: Materialize deps-build + ffmpeg-build from in-repo copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -r "$(cygpath -u "$GITHUB_WORKSPACE")/g/mpv-build/deps" \
+             "$(cygpath -u "$GITHUB_WORKSPACE")/g/deps-build"
+          cp -r "$(cygpath -u "$GITHUB_WORKSPACE")/g/mpv-build/ffmpeg-scripts" \
+             "$(cygpath -u "$GITHUB_WORKSPACE")/g/ffmpeg-build"
       - name: "Map G: drive"
         shell: pwsh
         run: |
@@ -328,31 +398,25 @@ jobs:
   # its internal copydlls.sh call)
   # ==========================================================================
   ffmpeg:
-    needs: deps
+    needs: [deps, setup]
     runs-on: windows-2025
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: "zn3"
-            install_dir: install
-          - target: "zn2"
-            install_dir: install-zn2
-          - target: "11700"
-            install_dir: install-11700
-          - target: "3050"
-            install_dir: install-3050
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
-      - name: Check out mpv-build (copydlls.sh + portable-conf)
+      - name: "Check out mpv-build (copydlls + ffmpeg-scripts)"
         uses: actions/checkout@v6
         with:
+          repository: ${{ github.repository_owner }}/mpv-build
           path: g/mpv-build
-      - name: Check out ffmpeg-build
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/ffmpeg-build
-          path: g/ffmpeg-build
+      - name: Materialize ffmpeg-build from in-repo copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -r "$(cygpath -u "$GITHUB_WORKSPACE")/g/mpv-build/ffmpeg-scripts" \
+             "$(cygpath -u "$GITHUB_WORKSPACE")/g/ffmpeg-build"
       - name: "Map G: drive"
         shell: pwsh
         run: |
@@ -532,16 +596,23 @@ jobs:
             > as a personal build artifact of the repository owner.
             > **Do not mirror, bundle, ship, or redistribute these zips.**
 
-            Self-compiled **FFmpeg** for four targets, clang CLANG64
-            toolchain, all dependencies built from git masters.
+            Self-compiled **FFmpeg** for the selected targets, clang
+            CLANG64 toolchain, all dependencies built from git masters
+            and STATICALLY embedded (libplacebo with libdovi, shaderc,
+            spirv-cross, SDL2, libc++). Lean bundles: ffmpeg/ffplay/
+            ffprobe + vulkan-1.dll + the VapourSynth frameserver runtime.
             libplacebo (shaderc SPIR-V) video filter included.
 
-            Bundles (4 zips — ffmpeg/ffplay/ffprobe + all runtime DLLs,
-            portable dirs):
-            - `ffmpeg-zn3` — Ryzen 5700X3D (znver3) + RTX 5070 (sm_120a)
-            - `ffmpeg-zn2` — Zen2 (znver2) + GTX 1650M (sm_75)
-            - `ffmpeg-11700` — i7-11700 (rocketlake) + RTX 4080 (sm_89)
-            - `ffmpeg-3050` — Zen2 (znver2) + RTX 3050M (sm_86)
+            Targets (default five; configurable per-run via the
+            `targets` dispatch input — see workflow definition):
+            - `ffmpeg-zn3` — Ryzen 5700X3D (znver3) + RTX 5070
+              (Blackwell, sm_120a)
+            - `ffmpeg-zn2` — Zen2 (znver2) + GTX 1650M (Pascal, sm_75)
+            - `ffmpeg-11700` — i7-11700 (rocketlake) + RTX 4080 (Ada,
+              sm_89)
+            - `ffmpeg-3050` — Zen2 (znver2) + RTX 3050M (Ampere, sm_86)
+            - `ffmpeg-14600` — i5-14600 (raptorlake) + RTX 50-series
+              (Blackwell, sm_120a)
 
             **Apple AudioToolbox AAC (`aac_at`)** is compiled in via the
             wat4ff wrapper. To USE it at runtime you must provide Apple's
