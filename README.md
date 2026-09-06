@@ -24,6 +24,15 @@ self-compiled from git masters via the
 | `ffmpeg-11700`  | i7-11700 (rocketlake) | RTX 4080 (Ada)     | sm_89   |
 | `ffmpeg-3050`   | Zen2 (znver2)       | RTX 3050M (Ampere)   | sm_86   |
 | `ffmpeg-14600`  | i5-14600 (raptorlake) | RTX 50-series (Blackwell) | sm_120a |
+| `ffmpeg-x64v2`  | generic (nehalem, v2) | any NVIDIA GPU | allcuda |
+| `ffmpeg-x64v3`  | generic (haswell, v3) | any NVIDIA GPU | allcuda |
+| `ffmpeg-x64v4`  | generic (skylake-avx512, v4) | any NVIDIA GPU | allcuda |
+
+The `x64v*` bundles are the clang equivalents of the GCC `x86-64-v2/v3/v4`
+portable ISA levels (SSE4.2 / AVX2 / AVX-512), paired with the **allcuda**
+profile: the embedded CUDA kernels are PTX 6.3 (sm_75 baseline) and the
+NVIDIA driver JIT-compiles them to ANY GPU from Pascal (2016) up at
+runtime — one build for every CUDA-capable NVIDIA GPU.
 
 Each zip is a lean portable dir: `ffmpeg.exe`, `ffplay.exe`,
 `ffprobe.exe` plus the minimal runtime DLL set (vulkan-1.dll + the
