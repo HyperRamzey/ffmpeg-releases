@@ -13,9 +13,11 @@ FFmpeg builds. Companion mpv builds release separately at
 
 ## What gets built
 
-Five CPU/GPU targets, clang 22 (MSYS2 CLANG64), every external library
-self-compiled from git masters via the
-[deps-build](https://github.com/HyperRamzey/deps-build) framework:
+Five hardware CPU/GPU targets plus three generic ISA levels, clang 22
+(MSYS2 CLANG64), every external library self-compiled from git masters
+via the framework vendored in
+[HyperRamzey/mpv-build](https://github.com/HyperRamzey/mpv-build)'s
+`deps/` fold:
 
 | Bundle          | CPU                 | GPU                  | CUDA arch |
 |-----------------|---------------------|----------------------|-----------|
@@ -81,16 +83,20 @@ a TWO-repo model: this workflow's only checkout is
 [HyperRamzey/mpv-build](https://github.com/HyperRamzey/mpv-build), which
 is self-contained — it vendors the dependency framework in `deps/` and
 the FFmpeg per-target build scripts in `ffmpeg-scripts/`. A materialize
-step copies those folds to the hardcoded `/g/deps-build` +
-`/g/ffmpeg-build` paths, so the exact local scripts run verbatim:
+step copies those folds to the hardcoded `/g/media-build/deps-build` +
+`/g/media-build/ffmpeg-build` paths, so the exact local scripts run
+verbatim. Locally everything lives under ONE consolidated root,
+`G:\media-build\` (mpv-build/, ffmpeg-build/, deps-build/, ffmpeg-releases/
++ the single `build_all.bat` entry point).
 
 ```text
-sync-sources -> deps x5 (incl. libplacebo) -> ffmpeg x5 -> release
+sync-sources -> deps x8 (incl. libplacebo) -> ffmpeg x8 -> release
 ```
 
 Trigger with **Actions → release → Run workflow** (optionally pass a
-`release_tag`), or push a `v*` tag. Every successful run posts a
-release with the five zips.
+`release_tag`), push a `v*` tag, or wait for the **weekly schedule**
+(Sundays 03:00 UTC). Every successful run posts a release with the
+zips for the selected targets.
 
 ## Source repos
 
